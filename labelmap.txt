@@ -1,0 +1,8 @@
+# label:color_rgb:parts:actions
+background:0,0,0::
+cheetah:224,64,64::
+fox:160,96,64::
+hyena:7,73,80::
+lion:32,128,224::
+tiger:112,192,192::
+wolf:102,178,138::
