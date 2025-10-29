@@ -10,6 +10,7 @@ D:\
    ├─ img_segment\
    │  ├─ model_train_v2.py          # training script
    │  └─ labelmap.txt               # class names + RGB colors
+   │  └─ .... and more
    ├─ models\
    │  └─ unet_boundary_best.keras   # best model (saved by EvalCallback)
    └─ data\
