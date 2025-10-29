@@ -4,16 +4,13 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 import sys
 import random
-
 import keras
 import numpy as np
 from PIL import Image
 
-# === Removed all torch/torchvision imports ===
 import tensorflow as tf
 from keras import layers, Model, ops
 from skimage.segmentation import find_boundaries
-
 from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
 from skimage.segmentation import watershed
@@ -486,12 +483,12 @@ def main_unet():
     if len(sys.argv) == 1:
         p.set_defaults(
             data_roots=[
-                r"D:\animal_data\img_segment\data\cheetah",
-                r"D:\animal_data\img_segment\data\lion",
-                r"D:\animal_data\img_segment\data\wolf",
-                r"D:\animal_data\img_segment\data\tiger",
-                r"D:\animal_data\img_segment\data\hyena",
-                r"D:\animal_data\img_segment\data\fox",
+                r"D:\animal_data\data\cheetah",
+                r"D:\animal_data\data\lion",
+                r"D:\animal_data\data\wolf",
+                r"D:\animal_data\data\tiger",
+                r"D:\animal_data\data\hyena",
+                r"D:\animal_data\data\fox",
             ],
             labelmap=r"D:\animal_data\img_segment\labelmap.txt",
             epochs=5,
@@ -553,7 +550,7 @@ def main_unet():
     model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
 
     # Eval + save-best callback (mirrors your original loop)
-    ckpt_path = Path(r"D:\animal_data\img_segment\models\unet_boundary_best.keras")
+    ckpt_path = Path(r"D:\animal_data\models\unet_boundary_best.keras")
     eval_cb = EvalCallback(val_ds, num_classes=num_classes, ignore_index=255, ckpt_path=ckpt_path)
 
     # Train
