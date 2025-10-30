@@ -25,25 +25,31 @@ Understanding data
     ImageSets: file text include name of original image used to train
 '''
 
+from pathlib import Path
+
 def read_labelmap(labelmap_path: Path): 
     """
-    Ignores blank lines and lines starting with '#'.
-    Returns (names, colors).
+    Reads a labelmap file, ignoring blank lines and lines starting with '#'.
+    Returns two lists: names (labels) and colors (RGB tuples).
     """
+    if not labelmap_path.exists():
+        raise FileNotFoundError(f"File not found: {labelmap_path}")
+
     names, colors = [], []
     text = Path(labelmap_path).read_text(encoding="utf-8").splitlines()
+
     for raw in text:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if ":" not in line:
-            raise ValueError(f"Check again labelmap line (no colon): {line}")
+            raise ValueError(f"Missing colon in line: {line}")
 
-        # Split once to get name, then keep the rest for color, action, ...
+        # Split once to get the name and the rest (color info)
         name, rest = line.split(":", 1)
         name = name.strip()
 
-        # Take 1st field with index 0 (color only)
+        # Take the first field (color only)
         color_field = rest.split(":", 1)[0]
         comps = color_field.split(",")
 
@@ -53,12 +59,26 @@ def read_labelmap(labelmap_path: Path):
         try:
             r, g, b = [int(c.strip()) for c in comps]
         except Exception as e:
-            raise ValueError(f"Non-integer RGB in line: {line}") from e
+            raise ValueError(f"Non-integer RGB values in line: {line}") from e
 
         names.append(name)
         colors.append((r, g, b))
 
     return names, colors
+
+
+# ======= CALLING THE FUNCTION =======
+
+# Replace this path with your actual file location
+labelmap_path = Path("labelmap.txt")
+
+# try:
+#     names, colors = read_labelmap(labelmap_path)
+#     print("Labelmap loaded successfully!")
+#     print("Label names:", names)
+#     print("RGB colors:", colors)
+# except Exception as e:
+#     print("Error reading labelmap:", e)
 
 def build_color_to_index(colors: List[Tuple[int,int,int]]) -> Dict[Tuple[int,int,int], int]:
     '''
