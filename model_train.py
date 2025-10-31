@@ -73,6 +73,11 @@ def build_color_to_index(colors: List[Tuple[int,int,int]]) -> Dict[Tuple[int,int
     return {tuple(map(int, c)): i for i, c in enumerate(colors)}
 
 def mask_rgb_to_index(mask_img: Image.Image, color_to_index: Dict[Tuple[int,int,int], int], ignore_index=255) -> np.ndarray:
+    """
+    Convert an RGB palette/truecolor mask (H,W,3) into class indices (H,W).
+    Any pixel color not found in color_to_index becomes ignore_index.
+    Ex: color_to_index = {(0,0,0):0, (224,64,64):1, (160,96,64):2}
+    """
     m = np.array(mask_img.convert("RGB"), dtype=np.uint8)  # (H,W,3)
     h, w, _ = m.shape
     flat = m.reshape(-1, 3)
@@ -155,6 +160,10 @@ def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6,
 
 # ---------- Boundary targets ----------
 def make_boundary_targets(mask_batch: np.ndarray, ignore_index: int = 255) -> np.ndarray:
+    """
+    mask_batch: (N, H, W) int class indices.
+    Returns boundary targets in shape (N, H, W, 1) float32 in {0,1}, with ignore as 0.
+    """
     out = []
     for m in mask_batch:
         mm = m.copy()
@@ -228,32 +237,15 @@ def instances_from_sem_and_boundary(
 def make_unet_model(num_classes: int):
     return build_unet_with_boundary(num_classes=num_classes)
 
-# ---------- Serializable custom loss: Sparse CE with ignore_index ----------
-@keras.saving.register_keras_serializable(package="custom")
-class SparseCEIgnoreIndex(keras.losses.Loss):
-    def __init__(self, ignore_index: int = 255, from_logits: bool = True, name: str = "sparse_ce_ignore_index"):
-        super().__init__(name=name)
-        self.ignore_index = int(ignore_index)
-        self.from_logits = bool(from_logits)
-        self._sce = keras.losses.SparseCategoricalCrossentropy(from_logits=self.from_logits, reduction="none")
-
-    def call(self, y_true, y_pred):
-        # y_true: (B,H,W) int ; y_pred: (B,H,W,C) logits
-        mask = tf.not_equal(y_true, self.ignore_index)  # (B,H,W)
-        y_true_clean = tf.where(mask, y_true, tf.zeros_like(y_true))
-        per_px = self._sce(y_true_clean, y_pred)        # (B,H,W)
-        per_px = tf.where(mask, per_px, tf.zeros_like(per_px))
-        denom = tf.maximum(tf.reduce_sum(tf.cast(mask, tf.float32)), 1.0)
-        return tf.reduce_sum(per_px) / denom
-
-    def get_config(self):
-        return {"ignore_index": self.ignore_index, "from_logits": self.from_logits, "name": self.name}
-
-# Keep a BCE for boundary head
-bce_logits_no_red = keras.losses.BinaryCrossentropy(from_logits=True, reduction='none')
 
 # ---------- Dataset wrapper ----------
 class MultiRootVOCDataset:
+    """
+    Read VOC-style segmentation from multiple dataset roots.
+    Each root must contain:
+      JPEGImages/, SegmentationClass/, ImageSets/Segmentation/train.txt or val.txt
+    A single, unified (names, colors) defines the global classes.
+    """
     def __init__(self, roots: List[str], image_set: str,
                  names: List[str], colors: List[Tuple[int,int,int]],
                  crop_size: int = 512, random_scale=(0.5, 2.0),
@@ -355,6 +347,26 @@ class MultiRootVOCDataset:
         img_np = (img_np - self.mean) / self.std
         mask_np = mask.astype(np.int64)
         return img_np, mask_np
+    
+# ---------- Losses ----------
+def sparse_ce_ignore_index(ignore_index: int, from_logits: bool = True):
+    """
+    SparseCategoricalCrossentropy that masks out ignore_index (ignore label value (e.g: 255)).
+    y_true: (B,H,W) int
+    y_pred: (B,H,W,C) logits
+    """
+    sce = keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits, reduction='none')  
+    def loss(y_true, y_pred):
+        mask = tf.not_equal(y_true, ignore_index)                       # (B,H,W)
+        y_true_clean = tf.where(mask, y_true, tf.zeros_like(y_true))    # labels >= 0
+        per_px = sce(y_true_clean, y_pred)                              # (B,H,W)
+        per_px = tf.where(mask, per_px, tf.zeros_like(per_px))
+        denom = tf.maximum(tf.reduce_sum(tf.cast(mask, tf.float32)), 1.0)
+        return tf.reduce_sum(per_px) / denom
+    return loss
+
+# We'll compute boundary BCE as mean-per-pixel in the eval callback for clarity.
+bce_logits_no_red = keras.losses.BinaryCrossentropy(from_logits=True, reduction='none')
 
 # ---------- tf.data pipelines ----------
 def make_tf_dataset(voc: MultiRootVOCDataset, batch_size: int, shuffle: bool,
@@ -416,29 +428,6 @@ class EvalCallback(tf.keras.callbacks.Callback):
             self.model.save(self.ckpt_path.as_posix())
             print(f"Saved best to {self.ckpt_path} (mIoU {miou:.3f})")
 
-# ---------- Helpers: latest checkpoint & epoch parsing ----------
-_CKPT_RE = re.compile(r"ckpt-epoch(\d{3})\.keras$")
-def find_latest_checkpoint(save_dir: Path) -> Optional[Path]:
-    if not save_dir.exists():
-        return None
-    cands = sorted(save_dir.glob("ckpt-epoch*.keras"))
-    if not cands:
-        return None
-    # pick highest epoch
-    best = None
-    best_ep = -1
-    for p in cands:
-        m = _CKPT_RE.search(p.name)
-        if m:
-            ep = int(m.group(1))
-            if ep > best_ep:
-                best, best_ep = p, ep
-    return best
-
-def parse_epoch_from_name(p: Path) -> int:
-    m = _CKPT_RE.search(p.name)
-    return int(m.group(1)) if m else 0
-
 # ---------- Main ----------
 def main_unet():
     p = argparse.ArgumentParser(
@@ -457,11 +446,6 @@ def main_unet():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--deterministic", action="store_true", help="Enable deterministic TF ops")
     p.add_argument("--save_dir", type=str, default="models")
-    # NEW: resume options
-    p.add_argument("--resume", type=str, default="", 
-                   help='Path to .keras checkpoint OR "auto" to pick latest; leave empty to start fresh.')
-    p.add_argument("--initial_epoch", type=int, default=-1,
-                   help="Override initial_epoch for fit(); if <0, auto-detect from checkpoint filename when resuming.")
 
     # Defaults for quick run (edit to your env)
     if len(sys.argv) == 1:
@@ -522,72 +506,30 @@ def main_unet():
     val_ds   = make_tf_dataset(val_ds_wrap,   batch_size=1,             shuffle=False, ignore_index=255,
                                num_parallel_calls=num_calls)
 
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
 
-    # === Build or resume model ===
-    model = None
-    initial_epoch = 0
+    model = make_unet_model(num_classes)
 
-    # 1) RESUME path selection
-    resume_path: Optional[Path] = None
-    if args.resume:
-        if args.resume.lower() == "auto":
-            resume_path = find_latest_checkpoint(save_dir)
-            if resume_path is None:
-                print("[Resume] No checkpoint found in save_dir; starting fresh.")
-        else:
-            rp = Path(args.resume)
-            if rp.exists() and rp.suffix == ".keras":
-                resume_path = rp
-            else:
-                print(f"[Resume] Provided --resume not found or not .keras: {args.resume}")
+    # Compile with masked sparse CE (semantic) + BCE(logits) (boundary)
+    losses = {
+        "sem_logits": sparse_ce_ignore_index(ignore_index=255, from_logits=True),
+        "boundary_logits": keras.losses.BinaryCrossentropy(from_logits=True)  # training uses standard mean batch loss
+    }
+    # You may tune this to upweight boundary supervision if desired
+    loss_weights = {"sem_logits": 1.0, "boundary_logits": 1.0}
+    optimizer = keras.optimizers.Adam(learning_rate=args.lr)
 
-    # 2) Load or build
-    if resume_path is not None:
-        print(f"[Resume] Loading {resume_path}")
-        # Keras 3: load_model restores architecture + weights + optimizer state if compile=True
-        model = keras.saving.load_model(resume_path.as_posix(), compile=True)
-        # initial_epoch choice
-        if args.initial_epoch >= 0:
-            initial_epoch = args.initial_epoch
-        else:
-            initial_epoch = parse_epoch_from_name(resume_path)
-        print(f"[Resume] initial_epoch set to {initial_epoch}")
-    else:
-        # Fresh build
-        model = make_unet_model(num_classes)
-        losses = {
-            "sem_logits": SparseCEIgnoreIndex(ignore_index=255, from_logits=True),
-            "boundary_logits": keras.losses.BinaryCrossentropy(from_logits=True)
-        }
-        loss_weights = {"sem_logits": 1.0, "boundary_logits": 1.0}
-        optimizer = keras.optimizers.Adam(learning_rate=args.lr)
-        model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
+    model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
 
-    # === Callbacks ===
-    # (a) Save full model each epoch with epoch-indexed filename
-    ckpt_cb = keras.callbacks.ModelCheckpoint(
-        filepath=(save_dir / "ckpt-epoch{epoch:03d}.keras").as_posix(),
-        monitor="val_loss",            # will exist if you pass validation_data
-        mode="min",
-        save_best_only=False,          # save every epoch
-        save_weights_only=False,       # FULL MODEL (.keras)
-        save_freq="epoch",
-        verbose=1
-    )
-    # (b) Your eval + best-by-mIoU
-    best_ckpt_path = save_dir / "unet_boundary_best.keras"
-    eval_cb = EvalCallback(val_ds, num_classes=num_classes, ignore_index=255, ckpt_path=best_ckpt_path)
-
-    # === Train / Continue ===
+    # Eval + save-best callback
+    ckpt_path = Path(args.save_dir) / "unet_boundary_best.keras"
+    eval_cb = EvalCallback(val_ds, num_classes=num_classes, ignore_index=255, ckpt_path=ckpt_path)
+    
+    # Train 
     history = model.fit(
         train_ds,
-        validation_data=val_ds,
         epochs=args.epochs,
-        initial_epoch=initial_epoch,
-        callbacks=[ckpt_cb, eval_cb],
-        verbose=1
+        verbose=1,
+        callbacks=[eval_cb],
     )
 
 if __name__ == "__main__":
