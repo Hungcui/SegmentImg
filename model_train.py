@@ -1,21 +1,3 @@
-"""
-U-Net (semantic + boundary) training over multiple VOC-style roots.
-Now with:
-- Full-model checkpoint per epoch (.keras) via ModelCheckpoint
-- Resume training from latest/specified .keras via --resume
-- Serializable custom loss (ignore_index) registered for Keras 3
-
-Refs:
-- Keras whole-model .keras save/load (architecture + weights + optimizer state)
-- ModelCheckpoint for periodic saves
-
-Run code:
-    New training: python model_train.py --epochs 100 --save_dir D:\animal_data\models
-    Continue trainint: python train_unet_resume.py --epochs 100 --save_dir D:\animal_data\models --resume auto
-
-"""
-
-# ---- Must be set BEFORE importing keras (Keras 3) ----
 import os
 os.environ.setdefault("KERAS_BACKEND", "tensorflow")  # choose TF backend for Keras 3
 
@@ -109,11 +91,16 @@ def compute_confusion_matrix(pred: np.ndarray, target: np.ndarray, num_classes: 
 
 def miou_from_confmat(cm: np.ndarray):
     tp = np.diag(cm).astype(np.float64)
-    fp = cm.sum(axis=1).astype(np.float64) - tp
-    fn = cm.sum(axis=0).astype(np.float64) - tp
-    denom = tp + fp + fn + 1e-6
-    iou = (tp / denom)
-    mean_iou = float(np.mean(iou))
+    fp = cm.sum(axis=0).astype(np.float64) - tp
+    fn = cm.sum(axis=1).astype(np.float64) - tp
+    denom = tp + fp + fn
+    # chỉ lớp có GT (row sum > 0) mới tham gia mean
+    with np.errstate(divide='ignore', invalid='ignore'):
+        iou = np.where(denom > 0, tp / denom, np.nan)
+    has_gt = cm.sum(axis=1) > 0
+    valid_ious = iou[has_gt]
+    mean_iou = float(np.nanmean(valid_ious)) if valid_ious.size > 0 else 0.0
+    iou = np.nan_to_num(iou, nan=0.0)
     return mean_iou, list(map(float, iou))
 
 # ---------- U-Net ----------
@@ -141,8 +128,7 @@ def upsample_block(x, conv_feature, n_filters, dropout=0.2, use_bn=True):
     x = double_conv_block(x, n_filters, use_bn=use_bn)
     return x
 
-def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6, 
-                             dropout=0.2, use_batchnorm=True):
+def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6, dropout=0.2, use_batchnorm=False):
     inputs = layers.Input(shape=input_shape)
     f1, p1 = downsample_block(inputs, 64, dropout, use_batchnorm)   
     f2, p2 = downsample_block(p1, 128, dropout, use_batchnorm)   
@@ -159,18 +145,43 @@ def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6,
     return model
 
 # ---------- Boundary targets ----------
-def make_boundary_targets(mask_batch: np.ndarray, ignore_index: int = 255) -> np.ndarray:
+def make_boundary_targets(
+    mask_batch: np.ndarray,
+    ignore_index: int = 255,
+    mode: str = "inner",
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    mask_batch: (N, H, W) int class indices.
-    Returns boundary targets in shape (N, H, W, 1) float32 in {0,1}, with ignore as 0.
+    Build boundary supervision targets and a mask of valid pixels.
+
+    Args:
+        mask_batch: (N, H, W) int class indices.
+        ignore_index: label value to ignore (not contribute to loss).
+        mode: boundary mode for skimage.find_boundaries: 'inner' (default), 'outer', 'thick', or 'subpixel'.
+
+    Returns:
+        boundary_targets: (N, H, W, 1) float32 in {0,1}
+        boundary_valid_mask: (N, H, W, 1) float32 in {0,1}, 0 where mask==ignore_index
     """
-    out = []
+    assert mask_batch.ndim == 3, f"Expected (N,H,W), got {mask_batch.shape}"
+    b_list, m_list = [], []
     for m in mask_batch:
-        mm = m.copy()
-        mm[mm == ignore_index] = 0
-        b = find_boundaries(mm, mode="inner").astype(np.float32)  # (H,W)
-        out.append(b[..., None])
-    return np.stack(out, axis=0)
+        # Valid pixels (contribute to loss)
+        valid = (m != ignore_index)
+
+        # Replace ignored labels so boundaries can be computed deterministically.
+        # We only *use* boundaries on valid pixels via the mask below.
+        mm = np.where(valid, m, 0)
+
+        # Boolean boundaries according to selected mode
+        b = find_boundaries(mm, mode=mode).astype(np.float32)  # (H,W) in {0,1}
+
+        # Expand dims to (H,W,1)
+        b_list.append(b[..., None])
+        m_list.append(valid.astype(np.float32)[..., None])
+
+    boundary_targets = np.stack(b_list, axis=0).astype(np.float32)        # (N,H,W,1)
+    boundary_valid_mask = np.stack(m_list, axis=0).astype(np.float32)     # (N,H,W,1)
+    return boundary_targets, boundary_valid_mask
 
 # ---------- Instances (not used in training; here for parity) ----------
 def instances_from_sem_and_boundary(
@@ -365,23 +376,31 @@ def sparse_ce_ignore_index(ignore_index: int, from_logits: bool = True):
         return tf.reduce_sum(per_px) / denom
     return loss
 
-# We'll compute boundary BCE as mean-per-pixel in the eval callback for clarity.
-bce_logits_no_red = keras.losses.BinaryCrossentropy(from_logits=True, reduction='none')
-
 # ---------- tf.data pipelines ----------
 def make_tf_dataset(voc: MultiRootVOCDataset, batch_size: int, shuffle: bool,
                     ignore_index: int, num_parallel_calls=tf.data.AUTOTUNE):
     indices = np.arange(len(voc), dtype=np.int32)
+
     def _py_load(idx):
         img, mask = voc.get_item(int(idx))
-        bt = make_boundary_targets(np.expand_dims(mask, 0), ignore_index=ignore_index)[0]
-        return img.astype(np.float32), mask.astype(np.int32), bt.astype(np.float32)
+        bt, bmask = make_boundary_targets(np.expand_dims(mask, 0), ignore_index=ignore_index)
+        return img.astype(np.float32), mask.astype(np.int32), bt[0].astype(np.float32), bmask[0].astype(np.float32)
+
     def _tf_map(idx):
-        img, mask, bt = tf.numpy_function(_py_load, [idx], [tf.float32, tf.int32, tf.float32])
+        img, mask, bt, bmask = tf.numpy_function(
+            _py_load, [idx], [tf.float32, tf.int32, tf.float32, tf.float32]
+        )
         img.set_shape([None, None, 3])
         mask.set_shape([None, None])
         bt.set_shape([None, None, 1])
-        return img, {"sem_logits": mask, "boundary_logits": bt}
+        bmask.set_shape([None, None, 1])  # 1 on valid pixels, 0 on ignore
+
+        # Labels
+        y = {"sem_logits": mask, "boundary_logits": bt}
+        sw = {"boundary_logits": bmask}
+
+        return img, y, sw
+
     ds = tf.data.Dataset.from_tensor_slices(indices)
     if shuffle:
         ds = ds.shuffle(buffer_size=len(voc), reshuffle_each_iteration=True)
@@ -406,7 +425,10 @@ class EvalCallback(tf.keras.callbacks.Callback):
         correct_px, total_px = 0, 0
         bce_sum, n_batches = 0.0, 0
         for batch in self.val_ds:
-            imgs, y = batch
+            if isinstance(batch, (tuple, list)) and len(batch) == 3:
+                imgs, y, _ = batch     # discard sample_weight
+            else:
+                imgs, y = batch
             masks = y["sem_logits"].numpy()
             boundary_t = y["boundary_logits"].numpy()
             sem_logits, boundary_logits = self.model(imgs, training=False)
@@ -415,9 +437,14 @@ class EvalCallback(tf.keras.callbacks.Callback):
             valid = (masks != self.ignore_index)
             correct_px += (preds == masks)[valid].sum()
             total_px   += valid.sum()
-            per_px = self._bce(boundary_t, boundary_logits).numpy()
-            bce_sum += per_px.mean()
+            # per-pixel BCE on boundary head (logits expected)
+            per_px = self._bce(boundary_t, boundary_logits).numpy()              # (B,H,W,1)
+            # mask out ignored semantic labels so they don't affect the boundary loss
+            ignore_mask = (masks != self.ignore_index)[..., None].astype(np.float32)  # (B,H,W,1)
+            valid = ignore_mask.sum()
+            bce_sum += float((per_px * ignore_mask).sum() / max(valid, 1.0))
             n_batches += 1
+
         pixacc = correct_px / max(1, total_px)
         miou, class_ious = miou_from_confmat(cm)
         val_bce = bce_sum / max(1, n_batches)
@@ -459,7 +486,7 @@ def main_unet():
                 r"D:\animal_data\data\fox",
             ],
             labelmap=r"D:\animal_data\img_segment\labelmap.txt",
-            epochs=3,
+            epochs=10,
             batch_size=4,
             crop_size=512,
             save_dir=r"D:\animal_data\models"
