@@ -329,9 +329,14 @@ class MultiRootVOCDataset:
             s = np.random.uniform(*self.random_scale)
             new_w = max(1, int(round(img.width  * s)))
             new_h = max(1, int(round(img.height * s)))
+
+            # 1) ẢNH: bilinear (OK cho RGB)
             img = img.resize((new_w, new_h), RESAMPLE_BILINEAR)
-            mask = Image.fromarray(mask, mode="L").resize((new_w, new_h), RESAMPLE_NEAREST)
-            mask = np.array(mask, dtype=np.int64)
+
+            # 2) MASK: ALWAYS NEAREST (giữ nhãn rời rạc 0..C-1 và 255 ignore)
+            mask_pil = Image.fromarray(mask.astype(np.uint16), mode="I;16")  # an toàn cho C>255
+            mask_pil = mask_pil.resize((new_w, new_h), RESAMPLE_NEAREST)
+            mask = np.array(mask_pil, dtype=np.int64)
         return img, mask
 
     def _random_crop(self, img, mask):
@@ -363,16 +368,23 @@ class MultiRootVOCDataset:
         short = min(img.width, img.height)
         if short < self.crop_size:
             s = self.crop_size / short
+
+            # 1) ẢNH: bilinear
             img = img.resize((int(round(img.width*s)), int(round(img.height*s))), RESAMPLE_BILINEAR)
-            mask = Image.fromarray(mask, mode="L").resize(
-                (int(round(mask.shape[1]*s)), int(round(mask.shape[0]*s))), RESAMPLE_NEAREST
+
+            # 2) MASK: nearest (dùng dtype rộng để không cắt nhãn khi >255)
+            mask_pil = Image.fromarray(mask.astype(np.uint16), mode="I;16")
+            mask_pil = mask_pil.resize(
+                (int(round(mask.shape[1]*s)), int(round(mask.shape[0]*s))),
+                RESAMPLE_NEAREST
             )
-            mask = np.array(mask, dtype=np.int64)
-        # center crop
-        th, tw = self.crop_size, self.crop_size
+            mask = np.array(mask_pil, dtype=np.int64)
+
+        # Center crop
+        th = tw = self.crop_size
         i = max(0, (img.height - th)//2)
         j = max(0, (img.width - tw)//2)
-        img = img.crop((j, i, j+tw, i+th))
+        img  = img.crop((j, i, j+tw, i+th))
         mask = mask[i:i+th, j:j+tw]
         return img, mask
 
