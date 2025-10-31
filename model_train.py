@@ -56,9 +56,8 @@ def build_color_to_index(colors: List[Tuple[int,int,int]]) -> Dict[Tuple[int,int
 
 def mask_rgb_to_index(mask_img: Image.Image, color_to_index: Dict[Tuple[int,int,int], int], ignore_index=255) -> np.ndarray:
     """
-    Convert an RGB palette/truecolor mask (H,W,3) into class indices (H,W).
-    Any pixel color not found in color_to_index becomes ignore_index.
-    Ex: color_to_index = {(0,0,0):0, (224,64,64):1, (160,96,64):2}
+    Convert an RGB mask (H,W,3) into class indices (H,W).
+    Any pixel color not found becomes ignore_index.
     """
     m = np.array(mask_img.convert("RGB"), dtype=np.uint8)  # (H,W,3)
     h, w, _ = m.shape
@@ -94,7 +93,6 @@ def miou_from_confmat(cm: np.ndarray):
     fp = cm.sum(axis=0).astype(np.float64) - tp
     fn = cm.sum(axis=1).astype(np.float64) - tp
     denom = tp + fp + fn
-    # chỉ lớp có GT (row sum > 0) mới tham gia mean
     with np.errstate(divide='ignore', invalid='ignore'):
         iou = np.where(denom > 0, tp / denom, np.nan)
     has_gt = cm.sum(axis=1) > 0
@@ -130,13 +128,13 @@ def upsample_block(x, conv_feature, n_filters, dropout=0.2, use_bn=True):
 
 def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6, dropout=0.2, use_batchnorm=False):
     inputs = layers.Input(shape=input_shape)
-    f1, p1 = downsample_block(inputs, 64, dropout, use_batchnorm)   
-    f2, p2 = downsample_block(p1, 128, dropout, use_batchnorm)   
-    f3, p3 = downsample_block(p2, 256, dropout, use_batchnorm)  
-    f4, p4 = downsample_block(p3, 512, dropout, use_batchnorm) 
-    bottleneck = double_conv_block(p4, 1024,  use_bn=use_batchnorm) 
-    u6 = upsample_block(bottleneck, f4, 512, dropout, use_batchnorm)  
-    u7 = upsample_block(u6, f3, 256, dropout, use_batchnorm) 
+    f1, p1 = downsample_block(inputs, 64, dropout, use_batchnorm)
+    f2, p2 = downsample_block(p1, 128, dropout, use_batchnorm)
+    f3, p3 = downsample_block(p2, 256, dropout, use_batchnorm)
+    f4, p4 = downsample_block(p3, 512, dropout, use_batchnorm)
+    bottleneck = double_conv_block(p4, 1024,  use_bn=use_batchnorm)
+    u6 = upsample_block(bottleneck, f4, 512, dropout, use_batchnorm)
+    u7 = upsample_block(u6, f3, 256, dropout, use_batchnorm)
     u8 = upsample_block(u7, f2, 128, dropout, use_batchnorm)
     u9 = upsample_block(u8, f1, 64, dropout, use_batchnorm)
 
@@ -150,16 +148,10 @@ def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6, dropout=0
 def make_boundary_targets(
     mask_batch: np.ndarray,
     ignore_index: int = 255,
-    mode: str = "inner",
+    mode: str = "thick",  # thicker boundaries improve signal early on
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build boundary supervision targets and a mask of valid pixels.
-
-    Args:
-        mask_batch: (N, H, W) int class indices.
-        ignore_index: label value to ignore (not contribute to loss).
-        mode: boundary mode for skimage.find_boundaries: 'inner' (default), 'outer', 'thick', or 'subpixel'.
-
     Returns:
         boundary_targets: (N, H, W, 1) float32 in {0,1}
         boundary_valid_mask: (N, H, W, 1) float32 in {0,1}, 0 where mask==ignore_index
@@ -167,17 +159,9 @@ def make_boundary_targets(
     assert mask_batch.ndim == 3, f"Expected (N,H,W), got {mask_batch.shape}"
     b_list, m_list = [], []
     for m in mask_batch:
-        # Valid pixels (contribute to loss)
         valid = (m != ignore_index)
-
-        # Replace ignored labels so boundaries can be computed deterministically.
-        # We only *use* boundaries on valid pixels via the mask below.
         mm = np.where(valid, m, 0)
-
-        # Boolean boundaries according to selected mode
         b = find_boundaries(mm, mode=mode).astype(np.float32)  # (H,W) in {0,1}
-
-        # Expand dims to (H,W,1)
         b_list.append(b[..., None])
         m_list.append(valid.astype(np.float32)[..., None])
 
@@ -196,15 +180,15 @@ def instances_from_sem_and_boundary(
     if isinstance(sem_logits, tf.Tensor): sem_logits = sem_logits.numpy()
     if isinstance(boundary_logits, tf.Tensor): boundary_logits = boundary_logits.numpy()
     if boundary_logits.ndim == 4:
-        if boundary_logits.shape[0] == 1 and boundary_logits.shape[-1] == 1:       # (1,H,W,1)
+        if boundary_logits.shape[0] == 1 and boundary_logits.shape[-1] == 1:
             boundary_prob = tf.nn.sigmoid(boundary_logits)[0, ..., 0].numpy()
-        elif boundary_logits.shape[0] == 1 and boundary_logits.shape[1] == 1:       # (1,1,H,W)
+        elif boundary_logits.shape[0] == 1 and boundary_logits.shape[1] == 1:
             boundary_prob = tf.nn.sigmoid(boundary_logits)[0, 0].numpy()
         else:
             raise ValueError(f"Unexpected boundary_logits shape {boundary_logits.shape}")
-    elif boundary_logits.ndim == 3 and boundary_logits.shape[-1] == 1:              # (H,W,1)
+    elif boundary_logits.ndim == 3 and boundary_logits.shape[-1] == 1:
         boundary_prob = tf.nn.sigmoid(boundary_logits[..., 0]).numpy()
-    elif boundary_logits.ndim == 2:                                                 # (H,W)
+    elif boundary_logits.ndim == 2:
         boundary_prob = tf.nn.sigmoid(boundary_logits).numpy()
     else:
         raise ValueError(f"Unsupported boundary_logits shape {boundary_logits.shape}")
@@ -250,14 +234,12 @@ def instances_from_sem_and_boundary(
 def make_unet_model(num_classes: int):
     return build_unet_with_boundary(num_classes=num_classes)
 
-
 # ---------- Dataset wrapper ----------
 class MultiRootVOCDataset:
     """
     Read VOC-style segmentation from multiple dataset roots.
     Each root must contain:
       JPEGImages/, SegmentationClass/, ImageSets/Segmentation/train.txt or val.txt
-    A single, unified (names, colors) defines the global classes.
     """
     def __init__(self, roots: List[str], image_set: str,
                  names: List[str], colors: List[Tuple[int,int,int]],
@@ -281,7 +263,7 @@ class MultiRootVOCDataset:
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-    def __len__(self): 
+    def __len__(self):
         return len(self.samples)
 
     def _load_sample(self, root: Path, img_id: str):
@@ -360,15 +342,15 @@ class MultiRootVOCDataset:
         img_np = (img_np - self.mean) / self.std
         mask_np = mask.astype(np.int64)
         return img_np, mask_np
-    
+
 # ---------- Losses ----------
 def sparse_ce_ignore_index(ignore_index: int, from_logits: bool = True):
     """
-    SparseCategoricalCrossentropy that masks out ignore_index (ignore label value (e.g: 255)).
+    SparseCategoricalCrossentropy that masks out ignore_index.
     y_true: (B,H,W) int
     y_pred: (B,H,W,C) logits
     """
-    sce = keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits, reduction='none')  
+    sce = keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits, reduction='none')
     def loss(y_true, y_pred):
         mask = tf.not_equal(y_true, ignore_index)                       # (B,H,W)
         y_true_clean = tf.where(mask, y_true, tf.zeros_like(y_true))    # labels >= 0
@@ -399,10 +381,17 @@ def make_tf_dataset(voc: MultiRootVOCDataset, batch_size: int, shuffle: bool,
 
         # Labels
         y = {"sem_logits": mask, "boundary_logits": bt}
+
+        # ======== Reweighted boundary sample-weights ========
+        # Focus loss on boundary pixels (positives), keep small weight on negatives.
+        pos_w = 1.0   # try 1.0; can tune up to 2–5 if boundaries are extremely sparse
+        neg_w = 0.05  # small non-zero helps stability (0.0..0.1)
+        bw = pos_w * bt + neg_w * (1.0 - bt)                 # (H,W,1)
         sw = {
-            "boundary_logits": bmask,                             # (H, W, 1) float32
-            "sem_logits": tf.ones_like(mask, dtype=tf.float32),   # (H, W) float32
+            "boundary_logits": bmask * bw,                   # zero on ignored; positive-focused
+            "sem_logits": tf.ones_like(mask, dtype=tf.float32),
         }
+        # ====================================================
 
         return img, y, sw
 
@@ -439,7 +428,7 @@ class EvalCallback(tf.keras.callbacks.Callback):
             boundary_t = y["boundary_logits"].numpy()
 
             out = self.model(imgs, training=False)
-            if isinstance(out, (tuple, list)):  # be robust if you switch back later
+            if isinstance(out, (tuple, list)):  # robust if switching back later
                 sem_logits, boundary_logits = out
             else:  # dict outputs (current setup)
                 sem_logits = out["sem_logits"]
@@ -453,9 +442,15 @@ class EvalCallback(tf.keras.callbacks.Callback):
             total_px   += valid.sum()
 
             per_px = self._bce(boundary_t, boundary_logits).numpy()  # (B,H,W,1)
+
+            # ======== Evaluate BCE only on boundary pixels (and valid area) ========
+            eval_weight = (boundary_t > 0.5).astype(np.float32)
             ignore_mask = (masks != self.ignore_index)[..., None].astype(np.float32)
-            valid = ignore_mask.sum()
-            bce_sum += float((per_px * ignore_mask).sum() / max(valid, 1.0))
+            
+            denom = (eval_weight * ignore_mask).sum()
+            bce_sum += float((per_px * eval_weight * ignore_mask).sum() / max(denom, 1.0))
+            # ======================================================================
+
             n_batches += 1
 
         pixacc = correct_px / max(1, total_px)
@@ -546,32 +541,33 @@ def main_unet():
     val_ds   = make_tf_dataset(val_ds_wrap,   batch_size=1,             shuffle=False, ignore_index=255,
                                num_parallel_calls=num_calls)
 
-
     model = make_unet_model(num_classes)
 
     # Compile with masked sparse CE (semantic) + BCE(logits) (boundary)
     losses = {
         "sem_logits": sparse_ce_ignore_index(ignore_index=255, from_logits=True),
-        "boundary_logits": keras.losses.BinaryCrossentropy(from_logits=True)  # training uses standard mean batch loss
+        "boundary_logits": keras.losses.BinaryCrossentropy(from_logits=True),
     }
-    # You may tune this to upweight boundary supervision if desired
-    loss_weights = {"sem_logits": 1.0, "boundary_logits": 1.0}
-    optimizer = keras.optimizers.Adam(learning_rate=args.lr)
+
+    # Weight semantic higher early on; you can increase boundary weight later
+    loss_weights = {"sem_logits": 1.0, "boundary_logits": 0.3}
+
+    # Gradient clipping stabilizes early epochs
+    optimizer = keras.optimizers.Adam(learning_rate=args.lr, clipnorm=1.0)
 
     model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
 
     # Eval + save-best callback
     ckpt_path = Path(args.save_dir) / "unet_boundary_best.keras"
     eval_cb = EvalCallback(val_ds, num_classes=num_classes, ignore_index=255, ckpt_path=ckpt_path)
-    
-    # Train 
+
+    # Train
     history = model.fit(
         train_ds,
         epochs=args.epochs,
         callbacks=[eval_cb],
         verbose=1
     )
-
 
 if __name__ == "__main__":
     main_unet()
