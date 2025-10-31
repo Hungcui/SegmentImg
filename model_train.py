@@ -139,9 +139,11 @@ def build_unet_with_boundary(input_shape=(512, 512, 3), num_classes=6, dropout=0
     u7 = upsample_block(u6, f3, 256, dropout, use_batchnorm) 
     u8 = upsample_block(u7, f2, 128, dropout, use_batchnorm)
     u9 = upsample_block(u8, f1, 64, dropout, use_batchnorm)
+
     sem_logits = layers.Conv2D(num_classes, 1, padding="same", name="sem_logits")(u9)     # (H,W,C)
     boundary_logits = layers.Conv2D(1, 1, padding="same", name="boundary_logits")(u9)     # (H,W,1)
-    model = Model(inputs, [sem_logits, boundary_logits], name="UNetBoundary")
+
+    model = Model(inputs, {"sem_logits": sem_logits, "boundary_logits": boundary_logits}, name="UNetBoundary")
     return model
 
 # ---------- Boundary targets ----------
@@ -397,7 +399,10 @@ def make_tf_dataset(voc: MultiRootVOCDataset, batch_size: int, shuffle: bool,
 
         # Labels
         y = {"sem_logits": mask, "boundary_logits": bt}
-        sw = {"boundary_logits": bmask}
+        sw = {
+            "boundary_logits": bmask,                             # (H, W, 1) float32
+            "sem_logits": tf.ones_like(mask, dtype=tf.float32),   # (H, W) float32
+        }
 
         return img, y, sw
 
@@ -426,21 +431,29 @@ class EvalCallback(tf.keras.callbacks.Callback):
         bce_sum, n_batches = 0.0, 0
         for batch in self.val_ds:
             if isinstance(batch, (tuple, list)) and len(batch) == 3:
-                imgs, y, _ = batch     # discard sample_weight
+                imgs, y, _ = batch  # discard sample_weight
             else:
                 imgs, y = batch
+
             masks = y["sem_logits"].numpy()
             boundary_t = y["boundary_logits"].numpy()
-            sem_logits, boundary_logits = self.model(imgs, training=False)
+
+            out = self.model(imgs, training=False)
+            if isinstance(out, (tuple, list)):  # be robust if you switch back later
+                sem_logits, boundary_logits = out
+            else:  # dict outputs (current setup)
+                sem_logits = out["sem_logits"]
+                boundary_logits = out["boundary_logits"]
+
             preds = tf.argmax(sem_logits, axis=-1).numpy().astype(np.int64)
+
             cm += compute_confusion_matrix(preds, masks, self.num_classes, self.ignore_index)
             valid = (masks != self.ignore_index)
             correct_px += (preds == masks)[valid].sum()
             total_px   += valid.sum()
-            # per-pixel BCE on boundary head (logits expected)
-            per_px = self._bce(boundary_t, boundary_logits).numpy()              # (B,H,W,1)
-            # mask out ignored semantic labels so they don't affect the boundary loss
-            ignore_mask = (masks != self.ignore_index)[..., None].astype(np.float32)  # (B,H,W,1)
+
+            per_px = self._bce(boundary_t, boundary_logits).numpy()  # (B,H,W,1)
+            ignore_mask = (masks != self.ignore_index)[..., None].astype(np.float32)
             valid = ignore_mask.sum()
             bce_sum += float((per_px * ignore_mask).sum() / max(valid, 1.0))
             n_batches += 1
@@ -465,7 +478,7 @@ def main_unet():
                    help="List of VOC roots (each has JPEGImages/, SegmentationClass/, ImageSets/Segmentation/)")
     p.add_argument("--labelmap", type=str,
                    help="Unified labelmap.txt for ALL classes (order defines indices).")
-    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--crop_size", type=int, default=512)
@@ -486,7 +499,7 @@ def main_unet():
                 r"D:\animal_data\data\fox",
             ],
             labelmap=r"D:\animal_data\img_segment\labelmap.txt",
-            epochs=10,
+            epochs=20,
             batch_size=4,
             crop_size=512,
             save_dir=r"D:\animal_data\models"
@@ -555,9 +568,10 @@ def main_unet():
     history = model.fit(
         train_ds,
         epochs=args.epochs,
-        verbose=1,
         callbacks=[eval_cb],
+        verbose=1
     )
+
 
 if __name__ == "__main__":
     main_unet()
