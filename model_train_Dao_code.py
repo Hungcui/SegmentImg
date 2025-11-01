@@ -392,23 +392,98 @@ class MultiRootVOCDataset:
         return img_np, mask_np
 
 # Losses 
-def sparse_ce_ignore_index(ignore_index: int, from_logits: bool = True):
-    """
-    SparseCategoricalCrossentropy that masks out ignore_index.
-    y_true: (B,H,W) int
-    y_pred: (B,H,W,C) logits
-    """
-    sce = keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits, reduction='none')  
+def sparse_ce_ignore_index(ignore_index: int, from_logits: bool = True, class_weights: np.ndarray | None = None):
+    sce = keras.losses.SparseCategoricalCrossentropy(from_logits=from_logits, reduction='none')
+    cw = tf.constant(class_weights, dtype=tf.float32) if class_weights is not None else None
+
     def loss(y_true, y_pred):
-        # y_true: (B,H,W), y_pred: (B,H,W,C)
-        mask = tf.not_equal(y_true, ignore_index)                       # (B,H,W)
-        # Keras expects labels >=0; replace ignore with 0 for loss computation but will be masked
+        y_true = tf.cast(y_true, tf.int32)                          # NHỚ ép int32
+        mask = tf.not_equal(y_true, ignore_index)
         y_true_clean = tf.where(mask, y_true, tf.zeros_like(y_true))
-        per_px = sce(y_true_clean, y_pred)                              # (B,H,W)
+        per_px = sce(y_true_clean, y_pred)                          # (B,H,W) dtype float32/16
+        if cw is not None:
+            wt = tf.gather(cw, tf.clip_by_value(y_true_clean, 0, tf.shape(cw)[0]-1))
+            per_px = per_px * tf.cast(wt, per_px.dtype)
         per_px = tf.where(mask, per_px, tf.zeros_like(per_px))
         denom = tf.maximum(tf.reduce_sum(tf.cast(mask, tf.float32)), 1.0)
-        return tf.reduce_sum(per_px) / denom
+        out = tf.reduce_sum(tf.cast(per_px, tf.float32)) / denom
+        return out                                                  # luôn float32
     return loss
+
+def dice_loss_sparse(num_classes: int, ignore_index: int):
+    def _loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.int32)                   
+        probs = tf.nn.softmax(y_pred, axis=-1)
+        onehot = tf.one_hot(
+            tf.clip_by_value(y_true, 0, num_classes-1),          
+            depth=num_classes, dtype=probs.dtype
+        )
+        mask = tf.not_equal(y_true, ignore_index)
+        mask_f = tf.cast(mask, probs.dtype)
+
+        probs = probs * mask_f[..., None]
+        onehot = onehot * mask_f[..., None]
+
+        dims = (0,1,2)
+        inter = tf.reduce_sum(probs * onehot, axis=dims)
+        denom = tf.reduce_sum(probs + onehot, axis=dims)
+        dice_c = (2.0*inter + 1.0) / (denom + 1.0)
+        return tf.cast(1.0 - tf.reduce_mean(dice_c), tf.float32)
+    return _loss
+
+
+def ce_dice_sparse_loss(num_classes: int, ignore_index: int, ce_ratio: float = 0.5,
+                        class_weights: np.ndarray | None = None):
+    ce = sparse_ce_ignore_index(ignore_index=ignore_index, from_logits=True, class_weights=class_weights)
+    dl = dice_loss_sparse(num_classes=num_classes, ignore_index=ignore_index)
+    ce_w = tf.constant(float(ce_ratio), dtype=tf.float32)
+
+    def _loss(y_true, y_pred):
+        ce_val = tf.cast(ce(y_true, y_pred), tf.float32)
+        dl_val = tf.cast(dl(y_true, y_pred), tf.float32)
+        return ce_w * ce_val + (1.0 - ce_w) * dl_val
+    return _loss
+
+
+def focal_loss_sparse(num_classes: int, ignore_index: int, alpha: float = 0.25, gamma: float = 2.0):
+    def _loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.int32)                       
+        probs = tf.nn.softmax(y_pred, axis=-1)
+        onehot = tf.one_hot(
+            tf.clip_by_value(y_true, 0, num_classes-1),
+            depth=num_classes, dtype=probs.dtype
+        )
+        mask = tf.not_equal(y_true, ignore_index)
+        mask_f = tf.cast(mask, probs.dtype)
+
+        probs = tf.clip_by_value(probs, keras.backend.epsilon(), 1.0 - keras.backend.epsilon())
+        pt = tf.reduce_sum(onehot * probs, axis=-1)
+        ce = -tf.math.log(pt)
+        fl = alpha * tf.pow(1.0 - pt, gamma) * ce
+        fl = fl * mask_f
+        denom = tf.maximum(tf.reduce_sum(mask_f), 1.0)
+        return tf.reduce_sum(fl) / denom
+    return _loss
+
+def tversky_loss_sparse(num_classes: int, ignore_index: int, alpha: float = 0.7, beta: float = 0.3):
+    def _loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.int32)                      
+        probs = tf.nn.softmax(y_pred, axis=-1)
+        onehot = tf.one_hot(
+            tf.clip_by_value(y_true, 0, num_classes-1),
+            depth=num_classes, dtype=probs.dtype
+        )
+        mask = tf.not_equal(y_true, ignore_index)
+        mask_f = tf.cast(mask, probs.dtype)
+        probs = probs * mask_f[..., None]
+        onehot = onehot * mask_f[..., None]
+        dims = (0,1,2)
+        tp = tf.reduce_sum(probs * onehot, axis=dims)
+        fp = tf.reduce_sum((1.0 - onehot) * probs, axis=dims)
+        fn = tf.reduce_sum(onehot * (1.0 - probs), axis=dims)
+        tversky = (tp + 1.0) / (tp + alpha * fp + beta * fn + 1.0)
+        return 1.0 - tf.reduce_mean(tversky)
+    return _loss
 
 # Binary cross-entropy with logits for boundary head
 bce_logits = keras.losses.BinaryCrossentropy(from_logits=True)
