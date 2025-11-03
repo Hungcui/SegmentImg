@@ -1,12 +1,15 @@
-import os, sys
+# test_model.py
+import os
+import sys
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 import argparse
 import numpy as np
 from PIL import Image
 
 # --- Keras 3 backend (must be set before importing keras) ---
 os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
 import tensorflow as tf
 import keras
 
@@ -18,6 +21,7 @@ if hasattr(_PILImage, "Resampling"):
 else:
     RESAMPLE_BILINEAR = _PILImage.BILINEAR
     RESAMPLE_NEAREST  = _PILImage.NEAREST
+
 
 # ---------- helpers ----------
 def read_labelmap(labelmap_path: Path):
@@ -33,20 +37,21 @@ def read_labelmap(labelmap_path: Path):
         name, rest = line.split(":", 1)
         name = name.strip()
         color_field = rest.split(":", 1)[0]
-        r,g,b = [int(c.strip()) for c in color_field.split(",")]
+        r, g, b = [int(c.strip()) for c in color_field.split(",")]
         names.append(name)
-        colors.append((r,g,b))
+        colors.append((r, g, b))
     return names, colors
 
-def colorize_index_mask(mask: np.ndarray, colors: List[Tuple[int,int,int]]) -> Image.Image:
-    """Map nhãn 0..C-1 -> RGB rời rạc để xem trực quan (không dùng cmap liên tục)."""
-    h,w = mask.shape
-    out = np.zeros((h,w,3), dtype=np.uint8)
+
+def colorize_index_mask(mask: np.ndarray, colors: List[Tuple[int, int, int]]) -> Image.Image:
+    """Map class indices 0..C-1 -> RGB for visualization (discrete palette)."""
+    h, w = mask.shape
+    out = np.zeros((h, w, 3), dtype=np.uint8)
     if colors:
         for idx, rgb in enumerate(colors):
             out[mask == idx] = rgb
     else:
-        # fallback: deterministic palette
+        # deterministic fallback palette
         k = int(mask.max()) + 1
         rng = np.random.default_rng(0)
         palette = rng.integers(0, 256, size=(k, 3), dtype=np.uint8)
@@ -54,22 +59,63 @@ def colorize_index_mask(mask: np.ndarray, colors: List[Tuple[int,int,int]]) -> I
             out[mask == idx] = palette[idx]
     return Image.fromarray(out, mode="RGB")
 
-def save_boundary_heatmap(boundary_logits: np.ndarray, path: Path):
-    if boundary_logits.ndim == 4:
-        prob = tf.nn.sigmoid(boundary_logits)[0,...,0].numpy()
-    elif boundary_logits.ndim == 3:
-        prob = tf.nn.sigmoid(boundary_logits[...,0]).numpy()
+
+def _to_numpy(x):
+    if isinstance(x, tf.Tensor):
+        return x.numpy()
+    return x
+
+
+def save_boundary_heatmap(boundary_logits, path: Path):
+    arr = _to_numpy(boundary_logits)
+    if arr.ndim == 4:
+        prob = tf.nn.sigmoid(arr)[0, ..., 0].numpy()
+    elif arr.ndim == 3:
+        # either (H,W,1) or (1,H,W)
+        if arr.shape[-1] == 1:
+            prob = tf.nn.sigmoid(arr[..., 0]).numpy()
+        elif arr.shape[0] == 1:
+            prob = tf.nn.sigmoid(arr[0]).numpy()
+        else:
+            prob = tf.nn.sigmoid(arr).numpy()
     else:
-        prob = tf.nn.sigmoid(boundary_logits).numpy()
-    arr = (np.clip(prob, 0, 1) * 255).astype(np.uint8)
-    Image.fromarray(arr, mode="L").save(path)
+        prob = tf.nn.sigmoid(arr).numpy()
+    img = (np.clip(prob, 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(img, mode="L").save(path)
+
 
 def preprocess(img: Image.Image) -> np.ndarray:
-    # Chuẩn ImageNet: mean/std phổ biến khi train backbone kiểu ImageNet
+    # ImageNet-style normalization
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     arr = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
     return (arr - mean) / std
+
+
+def _infer_expected_hw(model) -> Tuple[int, int]:
+    """
+    Infer expected (H, W) from a Keras model that may have dynamic sizes.
+    Returns (exp_h, exp_w) which can be None if fully dynamic.
+    """
+    # Prefer model.input_shape if available: (None, H, W, 3) or (None, None, None, 3)
+    in_shape = getattr(model, "input_shape", None)
+    if isinstance(in_shape, (list, tuple)) and len(in_shape) >= 3:
+        # handle nested lists from multi-input models (we expect single input here)
+        if isinstance(in_shape[0], (list, tuple)):
+            # pick first input
+            ish = in_shape[0]
+        else:
+            ish = in_shape
+        if len(ish) >= 3:
+            return ish[1], ish[2]
+
+    # Fallback: inspect the first input tensor
+    try:
+        tshape = tuple(model.inputs[0].shape)
+        return tshape[1], tshape[2]
+    except Exception:
+        return None, None
+
 
 # ---------- main ----------
 def main():
@@ -97,9 +143,9 @@ def main():
     out_dir    = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model for inference (no need to recompile)
+    # Load model for inference (no need to compile)
     print(f"Loading model: {model_path}")
-    model = keras.models.load_model(model_path.as_posix(), compile=False)  # inference only
+    model = keras.models.load_model(model_path.as_posix(), compile=False)
 
     # Read image
     print(f"Reading image: {image_path}")
@@ -107,11 +153,9 @@ def main():
     orig_w, orig_h = img.size
 
     # Determine expected input size safely (supports dynamic None)
-    in_shape = model.input_shape  # e.g. (None, H, W, 3) or (None, None, None, 3)
-    exp_h = in_shape[1]
-    exp_w = in_shape[2]
+    exp_h, exp_w = _infer_expected_hw(model)
 
-    # If model expects fixed size, resize the RGB image with bilinear.
+    # If model expects fixed size, resize with bilinear.
     if (exp_h is not None) and (exp_w is not None) and (img.size != (exp_w, exp_h)):
         img = img.resize((exp_w, exp_h), RESAMPLE_BILINEAR)
 
@@ -119,27 +163,37 @@ def main():
 
     # Preprocess & forward
     x = preprocess(img)[None, ...]  # (1,H,W,3)
-    sem_logits, boundary_logits = model(x, training=False)
+    out = model(x, training=False)
+
+    # ---- robustly get outputs whether dict or list/tuple ----
+    if isinstance(out, dict):
+        # If the model was built with a dict of outputs, __call__/predict return a dict
+        sem_logits = out["sem_logits"]
+        boundary_logits = out["boundary_logits"]
+    elif isinstance(out, (list, tuple)) and len(out) == 2:
+        sem_logits, boundary_logits = out
+    else:
+        raise RuntimeError(
+            f"Unexpected model output type/structure: {type(out)} "
+            f"(expected dict with keys 'sem_logits' and 'boundary_logits', or a 2-tuple)."
+        )
 
     # Semantic prediction (indices 0..C-1)
     pred = tf.argmax(sem_logits, axis=-1)[0].numpy().astype(np.int32)  # (H,W)
 
     # ---- Save index mask in 3 formats ----
-    # 1) NPY (lossless, giữ nguyên dtype)
-    np.save(out_dir / "pred_index.npy", pred)
-    # 2) PNG 8-bit để xem nhanh (OK nếu lớp ≤255)
-    Image.fromarray(pred.astype(np.uint8), mode="L").save(out_dir / "pred_index.png")
-    # 3) PNG 16-bit để an toàn khi lớp có thể >255
-    Image.fromarray(pred.astype(np.uint16), mode="I;16").save(out_dir / "pred_index_u16.png")
+    np.save(out_dir / "pred_index.npy", pred)  # lossless
+    Image.fromarray(pred.astype(np.uint8),  mode="L").save(out_dir / "pred_index.png")   # 8-bit
+    Image.fromarray(pred.astype(np.uint16), mode="I;16").save(out_dir / "pred_index_u16.png")  # 16-bit
 
     # ---- Optional colorized prediction for visualization ----
     names, colors = read_labelmap(Path(args.labelmap))
-    pred_color = colorize_index_mask(pred, colors)
-    pred_color.save(out_dir / "pred_color.png")
+    color_img = colorize_index_mask(pred, colors)
+    color_img.save(out_dir / "pred_color.png")
 
     # ---- Optional boundary heatmap ----
     if args.save_boundary:
-        save_boundary_heatmap(boundary_logits.numpy(), out_dir / "pred_boundary.png")
+        save_boundary_heatmap(boundary_logits, out_dir / "pred_boundary.png")
 
     print("Saved:")
     print(f"  {out_dir/'pred_index.npy'}")
@@ -150,9 +204,10 @@ def main():
         print(f"  {out_dir/'pred_boundary.png'}")
 
     # NOTE:
-    # - Nếu sau này cần resize mask dự đoán về size gốc để overlay,
-    #   hãy dùng RESAMPLE_NEAREST cho mask để không “pha” nhãn rời rạc.
-    #   vd: Image.fromarray(pred.astype(np.uint16), 'I;16').resize((orig_w, orig_h), RESAMPLE_NEAREST)
+    # If you later need to resize the predicted mask back to the original size to overlay on the RGB,
+    # use nearest-neighbor to avoid label mixing:
+    # Image.fromarray(pred.astype(np.uint16), 'I;16').resize((orig_w, orig_h), RESAMPLE_NEAREST)
+
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,8 @@
+'''
+tta = test time augmentation
+'''
+
+
 import numpy as np, tensorflow as tf
 
 class TTAInference:

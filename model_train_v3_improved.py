@@ -1056,7 +1056,7 @@ def main_unet():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save_dir", type=str, default="models")
-    p.add_argument("--architecture", type=str, default="unet", 
+    p.add_argument("--architecture", type=str, default="attention_unet", 
                    choices=["unet", "attention_unet", "unet_plusplus", "unet_backbone"],
                    help="Model architecture")
     p.add_argument("--backbone", type=str, default="efficientnet",
@@ -1299,4 +1299,3 @@ def main_unet():
 
 if __name__ == "__main__":
     main_unet()
-
