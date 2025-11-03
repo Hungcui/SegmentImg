@@ -13,6 +13,12 @@ from segtrain.models.attention_unet import build_attention_unet
 from segtrain.models.unetpp import build_unet_plusplus
 from segtrain.models.backbone_unet import build_unet_with_backbone
 
+'''run code as local
+python train.py --data_roots "D:\animal_data\data\cheetah" "D:\animal_data\data\lion" "D:\animal_data\data\wolf" "D:\animal_data\data\tiger"  "D:\animal_data\data\hyena" "D:\animal_data\data\fox" --labelmap "D:\animal_data\img_segment\labelmap.txt" --batch_size 4 --crop_size 512 --architecture attention_unet --loss focal --use_advanced_aug --save_dir "D:\animal_data\models"
+run code as gg drive
+Press "run"
+'''
+
 def main_unet():
     args = parse_args_with_defaults()
     is_colab = (os.path.exists("/content") or "COLAB_GPU" in os.environ)
