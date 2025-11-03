@@ -415,6 +415,7 @@ def build_attention_unet(input_shape=(512, 512, 3), num_classes=6, dropout=0.2, 
     model = Model(inputs, [sem_logits, boundary_logits], name="AttentionUNet")
     return model
 
+# fast but lower? accuracy
 def build_unet_plusplus(input_shape=(512, 512, 3), num_classes=6, dropout=0.2, use_batchnorm=True, deep_supervision=True):
     """U-Net++ architecture with deep supervision"""
     inputs = layers.Input(shape=input_shape)
@@ -423,7 +424,7 @@ def build_unet_plusplus(input_shape=(512, 512, 3), num_classes=6, dropout=0.2, u
     x00 = inputs
     f1, p1 = downsample_block(x00, 64, dropout, use_batchnorm)
     x10 = f1
-    
+
     f2, p2 = downsample_block(p1, 128, dropout, use_batchnorm)
     x20 = f2
     
@@ -809,7 +810,10 @@ class EvalCallback(tf.keras.callbacks.Callback):
 
 # ========== POST-PROCESSING ==========
 class PostProcessor:
-    """Post-processing pipeline for segmentation masks"""
+    """
+    Post-processing pipeline for segmentation masks
+    Clean and Sharpen mask segmentation
+    """
     def __init__(self, 
                  use_morphology=True,
                  morphology_size=3,
@@ -891,77 +895,78 @@ class PostProcessor:
         
         return result
 
-# ========== TEST TIME AUGMENTATION ==========
-class TTAInference:
-    """Test Time Augmentation for inference"""
-    def __init__(self, model, tta_transforms=["flip_h", "flip_v", "rotate_90"]):
-        self.model = model
-        self.tta_transforms = tta_transforms
-    
-    def _apply_transform(self, img: np.ndarray, transform: str) -> np.ndarray:
-        """Apply transformation to image"""
-        if transform == "flip_h":
-            return np.flip(img, axis=1)
-        elif transform == "flip_v":
-            return np.flip(img, axis=0)
-        elif transform == "rotate_90":
-            return np.rot90(img, k=1, axes=(0, 1))
-        elif transform == "rotate_180":
-            return np.rot90(img, k=2, axes=(0, 1))
-        elif transform == "rotate_270":
-            return np.rot90(img, k=3, axes=(0, 1))
-        return img
-    
-    def _reverse_transform(self, mask: np.ndarray, transform: str) -> np.ndarray:
-        """Reverse transformation on mask"""
-        if transform == "flip_h":
-            return np.flip(mask, axis=1)
-        elif transform == "flip_v":
-            return np.flip(mask, axis=0)
-        elif transform == "rotate_90":
-            return np.rot90(mask, k=-1, axes=(0, 1))
-        elif transform == "rotate_180":
-            return np.rot90(mask, k=-2, axes=(0, 1))
-        elif transform == "rotate_270":
-            return np.rot90(mask, k=-3, axes=(0, 1))
-        return mask
-    
-    def predict(self, img: np.ndarray) -> np.ndarray:
-        """Predict with TTA"""
-        # Original prediction
-        img_tf = tf.expand_dims(tf.constant(img, dtype=tf.float32), 0)
-        outputs = self.model(img_tf, training=False)
-        if isinstance(outputs, list):
-            sem_logits = outputs[0]
-        else:
-            sem_logits = outputs.get("sem_logits") if isinstance(outputs, dict) else outputs
+    # ========== TEST TIME AUGMENTATION ==========
+    class TTAInference:
+        """Test Time Augmentation for inference"""
+        def __init__(self, model, tta_transforms=["flip_h", "flip_v", "rotate_90"]):
+            self.model = model
+            self.tta_transforms = tta_transforms
         
-        probs = tf.nn.softmax(sem_logits, axis=-1).numpy()[0]
-        predictions = [probs]
+        def _apply_transform(self, img: np.ndarray, transform: str) -> np.ndarray:
+            """Apply transformation to image"""
+            if transform == "flip_h":
+                return np.flip(img, axis=1)
+            elif transform == "flip_v":
+                return np.flip(img, axis=0)
+            elif transform == "rotate_90":
+                return np.rot90(img, k=1, axes=(0, 1))
+            elif transform == "rotate_180":
+                return np.rot90(img, k=2, axes=(0, 1))
+            elif transform == "rotate_270":
+                return np.rot90(img, k=3, axes=(0, 1))
+            return img
         
-        # TTA predictions
-        for transform in self.tta_transforms:
-            img_transformed = self._apply_transform(img, transform)
-            img_tf = tf.expand_dims(tf.constant(img_transformed, dtype=tf.float32), 0)
+        def _reverse_transform(self, mask: np.ndarray, transform: str) -> np.ndarray:
+            """Reverse transformation on mask"""
+            if transform == "flip_h":
+                return np.flip(mask, axis=1)
+            elif transform == "flip_v":
+                return np.flip(mask, axis=0)
+            elif transform == "rotate_90":
+                return np.rot90(mask, k=-1, axes=(0, 1))
+            elif transform == "rotate_180":
+                return np.rot90(mask, k=-2, axes=(0, 1))
+            elif transform == "rotate_270":
+                return np.rot90(mask, k=-3, axes=(0, 1))
+            return mask
+        
+        def predict(self, img: np.ndarray) -> np.ndarray:
+            """Predict with TTA"""
+            # Original prediction
+            img_tf = tf.expand_dims(tf.constant(img, dtype=tf.float32), 0)
             outputs = self.model(img_tf, training=False)
             if isinstance(outputs, list):
                 sem_logits = outputs[0]
             else:
                 sem_logits = outputs.get("sem_logits") if isinstance(outputs, dict) else outputs
             
-            probs_transformed = tf.nn.softmax(sem_logits, axis=-1).numpy()[0]
-            probs_reversed = self._reverse_transform(probs_transformed, transform)
-            predictions.append(probs_reversed)
-        
-        # Average predictions
-        avg_probs = np.mean(predictions, axis=0)
-        return np.argmax(avg_probs, axis=-1), avg_probs
+            probs = tf.nn.softmax(sem_logits, axis=-1).numpy()[0]
+            predictions = [probs]
+            
+            # TTA predictions
+            for transform in self.tta_transforms:
+                img_transformed = self._apply_transform(img, transform)
+                img_tf = tf.expand_dims(tf.constant(img_transformed, dtype=tf.float32), 0)
+                outputs = self.model(img_tf, training=False)
+                if isinstance(outputs, list):
+                    sem_logits = outputs[0]
+                else:
+                    sem_logits = outputs.get("sem_logits") if isinstance(outputs, dict) else outputs
+                
+                probs_transformed = tf.nn.softmax(sem_logits, axis=-1).numpy()[0]
+                probs_reversed = self._reverse_transform(probs_transformed, transform)
+                predictions.append(probs_reversed)
+            
+            # Average predictions
+            avg_probs = np.mean(predictions, axis=0)
+            return np.argmax(avg_probs, axis=-1), avg_probs
 
 # ========== INFERENCE PIPELINE ==========
 def inference_pipeline(model_path: str, image_path: str, output_path: str,
                       labelmap_path: str, crop_size: int = 512,
                       use_tta: bool = True, use_postprocessing: bool = True):
     """
+    Load everything it needs: model_path, labelmap.txt
     Complete inference pipeline:
     1. Read image → normalize → resize/pad
     2. Model inference (with TTA)
@@ -1163,7 +1168,7 @@ def main_unet():
             missing_roots.append(r)
     
     if missing_roots:
-        print(f"\n⚠️  Warning: {len(missing_roots)} dataset(s) not found!")
+        print(f"\n  Warning: {len(missing_roots)} dataset(s) not found!")
         if is_colab:
             print("💡 Tip: Make sure you have:")
             print("   1. Mounted Google Drive: drive.mount('/content/drive')")
