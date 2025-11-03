@@ -1,5 +1,3 @@
-*tớ đã up present_plan.md trên github rồi nhé, mn xem có j cần chỉnh sửa ko và nhớ xem có j bất ổn ko
-
 Title: U-net training for Semantic Segmentation
 
 Purpose for this project ? (form report?)
