@@ -1,21 +1,25 @@
 Title: U-net training for Semantic Segmentation
 
-Problem definition: multi class animal segmentation with VOC style folders
-Purpose for this project ?
+Purpose for this project ? (form report?)
 
 Data: 
-    Preparation: 6 type animal data
-        each animal data have 4 seperate file
+    Preparation: 
+        6 type animal data - each animal data have 4 seperate file
             ImageSets: train and val txt include set of train and val image's name
             JPEGImage: original image
             SegmentationClass: segmented image
             SegmentationObject: each animal segmentation seperated with different type ?????
         labelmap.txt
 
-    limited data(why limited ?) 60 img train / 15 img val / 15 img test -> data augmentation for improve diversity
+    Preprocessing:
+        Clean-up data: 
+            Check each image has as a group (original, segmentation)
+            Check image size -> resize to 512 x 512 if not 512 x 512 img
+        limited data(why limited ?) 60 img train / 15 img val / 15 img test(per animal) as for our model -> data augmentation for improve diversity
+        
 
 Diagram pipeline:
-Data -> Augment/Normalize -> Model (Attention U-net, Standard U-net, Backbone U-net) -> Output: Semantic and boundary -> Losses -> eval callback(mIoU) -> Inference (TTA) -> Post-processing
+Data -> Augment/Normalize -> Model (Attention U-net, Standard U-net, Backbone U-net) -> Output: Semantic and boundary logit -> Losses -> eval callback(mIoU) -> Inference (TTA) -> Post-processing
 WAIT: boundary logit for instance segmentation ?????
 
 
