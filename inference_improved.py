@@ -9,7 +9,8 @@ import cv2
 import tensorflow as tf
 import keras
 from model_train_v3_improved import (
-    read_labelmap, TTAInference, PostProcessor, inference_pipeline
+    read_labelmap, TTAInference, PostProcessor, inference_pipeline,
+    instances_from_sem_and_boundary
 )
 
 def main():
