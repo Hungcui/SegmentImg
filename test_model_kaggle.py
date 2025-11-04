@@ -1,6 +1,6 @@
 """
-Test Model trên Google Colab
-Sử dụng: Upload file này lên Colab và chạy với arguments hoặc không có arguments (dùng defaults)
+Test Model trên Kaggle
+Sử dụng: Upload file này lên Kaggle và chạy với arguments hoặc không có arguments (dùng defaults)
 """
 
 import os
@@ -12,8 +12,8 @@ import tensorflow as tf
 import keras
 import argparse
 
-# Phát hiện Colab
-is_colab = os.path.exists("/content") or "COLAB_GPU" in os.environ
+# Phát hiện Kaggle
+is_kaggle = os.path.exists("/kaggle/input") or os.path.exists("/kaggle/working")
 
 def read_labelmap(labelmap_path: Path):
     """Đọc labelmap file"""
@@ -51,21 +51,21 @@ def preprocess(img: Image.Image) -> np.ndarray:
     return (arr - mean) / std
 
 def main():
-    parser = argparse.ArgumentParser(description="Test model trên Colab")
+    parser = argparse.ArgumentParser(description="Test model trên Kaggle")
     parser.add_argument("--model_path", type=str, help="Đường dẫn model file (.keras)")
     parser.add_argument("--image_path", type=str, help="Đường dẫn ảnh test")
     parser.add_argument("--output_dir", type=str, help="Thư mục lưu kết quả")
     parser.add_argument("--labelmap", type=str, help="Đường dẫn labelmap.txt")
     parser.add_argument("--save_boundary", action="store_true", help="Lưu boundary heatmap")
     
-    # Defaults cho Colab
-    if len(sys.argv) == 1 or (is_colab and not any(['--model_path' in s or '--image_path' in s for s in sys.argv])):
-        if is_colab:
-            # Tự động tìm model và labelmap
+    # Defaults cho Kaggle
+    if len(sys.argv) == 1 or (is_kaggle and not any(['--model_path' in s or '--image_path' in s for s in sys.argv])):
+        if is_kaggle:
+            # Tự động tìm model trong /kaggle/working/models/
             model_candidates = [
-                "/content/drive/MyDrive/SegmentImg/models/attention_unet_focal_best.keras",
-                "/content/drive/MyDrive/SegmentImg/models/unet_boundary_best.keras",
-                "/content/models/attention_unet_focal_best.keras",
+                "/kaggle/working/models/attention_unet_focal_best.keras",
+                "/kaggle/working/models/unet_boundary_best.keras",
+                "/kaggle/working/models/attention_unet_ce_best.keras",
             ]
             model_path = None
             for candidate in model_candidates:
@@ -73,31 +73,51 @@ def main():
                     model_path = candidate
                     break
             
+            # Tìm labelmap
             labelmap_candidates = [
-                "/content/labelmap.txt",
-                "/content/drive/MyDrive/SegmentImg/labelmap.txt",
+                "/kaggle/working/labelmap.txt",
+                "/kaggle/input/segmentimg/labelmap.txt",
+                "/kaggle/input/animal-segmentation-dataset/labelmap.txt",
             ]
-            labelmap_path = "/content/labelmap.txt"
+            labelmap_path = "/kaggle/working/labelmap.txt"
             for candidate in labelmap_candidates:
                 if Path(candidate).exists():
                     labelmap_path = candidate
                     break
             
-            # Tìm ảnh test trong data
-            image_candidates = [
-                "/content/drive/MyDrive/SegmentImg/data/cheetah/JPEGImages/00000000_512resized.png",
-                "/content/drive/MyDrive/SegmentImg/data/lion/JPEGImages/00000000_512resized.png",
-            ]
-            image_path = None
-            for candidate in image_candidates:
-                if Path(candidate).exists():
-                    image_path = candidate
-                    break
+            # Tìm ảnh test trong data (từ dataset hoặc đã giải nén)
+            image_candidates = []
+            # Tìm trong /kaggle/working/data (đã giải nén)
+            working_data = Path("/kaggle/working/data")
+            if working_data.exists():
+                for folder in ["cheetah", "lion", "wolf", "tiger", "hyena", "fox"]:
+                    jpeg_dir = working_data / folder / "JPEGImages"
+                    if jpeg_dir.exists():
+                        images = list(jpeg_dir.glob("*.jpg")) + list(jpeg_dir.glob("*.png"))
+                        if images:
+                            image_candidates.append(str(images[0]))
+                            break
+            
+            # Tìm trong /kaggle/input (dataset)
+            for dataset_name in ["segmentimg", "animal-segmentation-dataset", "segmentation-data"]:
+                dataset_path = Path(f"/kaggle/input/{dataset_name}")
+                if dataset_path.exists():
+                    data_dir = dataset_path / "data"
+                    if data_dir.exists():
+                        for folder in ["cheetah", "lion", "wolf", "tiger", "hyena", "fox"]:
+                            jpeg_dir = data_dir / folder / "JPEGImages"
+                            if jpeg_dir.exists():
+                                images = list(jpeg_dir.glob("*.jpg")) + list(jpeg_dir.glob("*.png"))
+                                if images:
+                                    image_candidates.append(str(images[0]))
+                                    break
+                    if image_candidates:
+                        break
             
             parser.set_defaults(
-                model_path=model_path or "/content/drive/MyDrive/SegmentImg/models/attention_unet_focal_best.keras",
-                image_path=image_path or "/content/test_image.jpg",
-                output_dir="/content/drive/MyDrive/SegmentImg/test_results",
+                model_path=model_path or "/kaggle/working/models/attention_unet_focal_best.keras",
+                image_path=image_candidates[0] if image_candidates else "/kaggle/working/test_image.jpg",
+                output_dir="/kaggle/working/test_results",
                 labelmap=labelmap_path,
                 save_boundary=True
             )
@@ -122,7 +142,7 @@ def main():
     print("="*60)
     print("TEST MODEL")
     print("="*60)
-    print(f"🌐 Running on: {'Google Colab' if is_colab else 'Local Machine'}")
+    print(f"🏆 Running on: {'Kaggle' if is_kaggle else 'Local Machine'}")
     print(f"📦 Model: {model_path}")
     print(f"🖼️  Image: {image_path}")
     print(f"📁 Output: {output_dir}")
@@ -132,18 +152,22 @@ def main():
     # Kiểm tra files tồn tại
     if not model_path.exists():
         print(f"\n❌ Model không tồn tại: {model_path}")
-        if is_colab:
-            print("💡 Tip: Upload model vào Drive hoặc chỉ định đường dẫn đúng")
+        if is_kaggle:
+            print("💡 Tip: Upload model vào /kaggle/working/models/ hoặc chỉ định đường dẫn đúng")
+            print("💡 Model thường được lưu tại: /kaggle/working/models/{architecture}_{loss}_best.keras")
         sys.exit(1)
     
     if not image_path.exists():
         print(f"\n❌ Ảnh không tồn tại: {image_path}")
-        if is_colab:
-            print("💡 Tip: Upload ảnh test hoặc chỉ định đường dẫn đúng")
+        if is_kaggle:
+            print("💡 Tip: Upload ảnh test vào /kaggle/working/ hoặc chỉ định đường dẫn đúng")
+            print("💡 Hoặc sử dụng ảnh từ dataset: /kaggle/working/data/{animal}/JPEGImages/")
         sys.exit(1)
     
     if not labelmap_path.exists():
         print(f"\n❌ Labelmap không tồn tại: {labelmap_path}")
+        if is_kaggle:
+            print("💡 Tip: Upload labelmap.txt vào /kaggle/working/ hoặc dataset")
         sys.exit(1)
     
     # Tạo output directory
@@ -182,27 +206,7 @@ def main():
     
     # Inference
     print(f"\n🔮 Running inference...")
-    # Một số model (như attention_unet) được save với named inputs
-    # Kiểm tra input names từ model
-    input_name = None
-    if hasattr(model, 'input_names') and model.input_names:
-        input_name = model.input_names[0]
-    elif hasattr(model, 'inputs') and len(model.inputs) > 0:
-        input_layer = model.inputs[0]
-        if hasattr(input_layer, 'name'):
-            input_name = input_layer.name
-    
-    # Nếu không tìm thấy input name, thử với 'input_layer_1' (common name)
-    if not input_name:
-        input_name = 'input_layer_1'
-    
-    # Thử với dictionary format trước
-    try:
-        model_input = {input_name: x}
-        outputs = model(model_input, training=False)
-    except (KeyError, TypeError, ValueError):
-        # Nếu dictionary format fail, thử tensor trực tiếp
-        outputs = model(x, training=False)
+    outputs = model(x, training=False)
     
     # Parse outputs
     if isinstance(outputs, list):
@@ -238,22 +242,16 @@ def main():
         boundary_img.save(output_dir / "pred_boundary.png")
         print(f"   ✅ Saved boundary heatmap")
     
-    # 4. Overlay trên ảnh gốc (luôn tạo overlay)
-    # Load ảnh gốc để overlay
-    img_orig = Image.open(image_path).convert("RGB")
-    
-    # Resize prediction về kích thước gốc nếu cần
+    # 4. Overlay trên ảnh gốc (resize về kích thước gốc)
     if orig_size != img.size:
         pred_resized = Image.fromarray(pred.astype(np.uint8), mode="L").resize(orig_size, Image.NEAREST)
         pred_color_resized = colorize_index_mask(np.array(pred_resized), colors)
-    else:
-        # Nếu không resize, dùng trực tiếp prediction
-        pred_color_resized = colorize_index_mask(pred, colors)
-    
-    # Blend với ảnh gốc
-    overlay = Image.blend(img_orig, pred_color_resized, 0.5)
-    overlay.save(output_dir / "pred_overlay.png")
-    print(f"   ✅ Saved overlay")
+        
+        # Blend với ảnh gốc
+        img_orig = Image.open(image_path).convert("RGB")
+        overlay = Image.blend(img_orig, pred_color_resized, 0.5)
+        overlay.save(output_dir / "pred_overlay.png")
+        print(f"   ✅ Saved overlay")
     
     print(f"\n✅ Test completed!")
     print(f"\n📁 Results saved to: {output_dir}")
@@ -261,7 +259,8 @@ def main():
     print(f"   - pred_color.png (colorized mask)")
     if boundary_logits is not None and args.save_boundary:
         print(f"   - pred_boundary.png (boundary heatmap)")
-    print(f"   - pred_overlay.png (overlay on original image)")
+    if orig_size != img.size:
+        print(f"   - pred_overlay.png (overlay on original image)")
     
     # Hiển thị prediction stats
     unique_classes, counts = np.unique(pred, return_counts=True)
@@ -269,7 +268,18 @@ def main():
     for cls_id, count in zip(unique_classes, counts):
         if cls_id < len(names):
             print(f"   {names[cls_id]}: {count} pixels ({count/pred.size*100:.1f}%)")
+    
+    # Hiển thị link download trên Kaggle
+    if is_kaggle:
+        print(f"\n💡 Trên Kaggle, file trong /kaggle/working/ sẽ tự động được lưu khi commit notebook")
+        print(f"💡 Hoặc download thủ công bằng cách click vào file trong file browser")
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
 

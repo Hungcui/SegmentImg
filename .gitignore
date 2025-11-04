@@ -50,6 +50,7 @@ saved_models/
 
 # Data (không commit data)
 data/
+*.zip
 *.jpg
 *.png
 *.jpeg
